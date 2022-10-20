@@ -1180,7 +1180,8 @@ public:
           }
         }
 
-        auto actor = kj::addRef(*actors.findOrCreate(idStr, [&]() {
+        // auto actor = kj::addRef(*actors.findOrCreate(idStr, [&]() {
+        auto actorImpl = *actors.findOrCreate(idStr, [&]() {
           auto persistent = config.tryGet<Durable>().map([&](const Durable& d) {
             // TODO(someday): Implement some sort of actual durable storage. For now we force
             //   `ActorCache` into `neverFlush` mode so that all state is kept in-memory.
@@ -1194,15 +1195,24 @@ public:
           };
 
           TimerChannel& timerChannel = service;
-          auto newActor = kj::refcounted<Worker::Actor>(
+          // auto newActor = kj::refcounted<Worker::Actor>(
+          auto newActorImpl = kj::heap<Worker::Actor::Impl>(
               *service.worker, kj::mv(id), true, kj::mv(persistent),
               className, kj::mv(makeStorage), lock,
               timerChannel, kj::refcounted<ActorObserver>());
 
-          return kj::HashMap<kj::String, kj::Own<Worker::Actor>>::Entry {
-            kj::mv(idStr), kj::mv(newActor)
+          // return kj::HashMap<kj::String, kj::Own<Worker::Actor>>::Entry {
+          return kj::HashMap<kj::String, kj::Own<Worker::Actor::Impl>>::Entry {
+            kj::mv(idStr), kj::mv(newActorImpl)
           };
-        }));
+        });
+        kj::Own<Worker::Actor> actor;
+        KJ_IF_MAYBE(a, actorImpl.get().maybeActor) {
+          actor = kj::addRef(*a);
+        } else {
+          auto& aRef = actorImpl.get().maybeActor.emplace(kj::refcounted<Worker::Actor>(*actorImpl));
+          actor = kj::addRef(aRef);
+        }
 
         return kj::heap<ActorChannelImpl>(service, className, kj::mv(actor));
       });
@@ -1214,7 +1224,7 @@ public:
     WorkerService& service;
     kj::StringPtr className;
     const ActorConfig& config;
-    kj::HashMap<kj::String, kj::Own<Worker::Actor>> actors;
+    kj::HashMap<kj::String, kj::Own<Worker::Actor::Impl>> actors;
   };
 
 private:

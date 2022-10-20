@@ -105,6 +105,8 @@ public:
   // data via `request`'s Jaeger span.
 
   class Actor;
+  struct ActorImpl;
+  // TODO(now): Rename Worker::Actor
 
   kj::Promise<AsyncLock> takeAsyncLockWhenActorCacheReady(kj::Date now, Actor& actor,
       RequestObserver& request) const;
@@ -621,17 +623,9 @@ class Worker::Actor final: public kj::Refcounted {
   // after some time.
 
 public:
-  // TODO(now): Rename to Worker::Actor (not as a subtype move to toplevel)
-  struct Impl;
-  // Represents actor state within a Worker instance. This object tracks the JavaScript heap
-  // objects backing `event.actorState`. Multiple `Actor`s can be created within a single `Worker`.
-
-  using MakeStorageFunc = kj::Function<jsg::Ref<api::DurableObjectStorage>(
-      jsg::Lock& js, const ApiIsolate& apiIsolate, ActorCache& actorCache)>;
-
   using Id = kj::OneOf<kj::Own<ActorIdFactory::ActorId>, kj::String>;
 
-  Actor(Impl& impl) : impl(impl) {}
+  Actor(ActorImpl& impl) : impl(impl) {}
   // Create a new Actor hosted by this Worker. Note that this Actor object may only be manipulated
   // from the thread that created it.
 
@@ -698,7 +692,10 @@ public:
   // isn't a duplicate alarm, func will be called to run the alarm.
 
 private:
-  Impl& impl;
+  ActorImpl& impl;
+  // Represents actor state within a Worker instance. This object tracks the JavaScript heap
+  // objects backing `event.actorState`. Multiple `Actor`s can be created within a single `Worker`.
+
 
   kj::Maybe<api::ExportedHandler&> getHandler();
   friend class Worker;

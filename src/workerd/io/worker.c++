@@ -3,6 +3,7 @@
 //     https://opensource.org/licenses/Apache-2.0
 
 #include "worker.h"
+#include "actor.h"
 #include "promise-wrapper.h"
 #include "actor-cache.h"
 #include <workerd/util/thread-scopes.h>
@@ -2510,150 +2511,43 @@ void Worker::Isolate::logMessage(v8::Local<v8::Context> context,
 }
 
 // =======================================================================================
+Worker::ActorImpl::ActorImpl(const Worker& workerRef, Worker::LockType lockType,
+      Worker::Actor::Id actorId, bool hasTransient,
+      kj::Maybe<rpc::ActorStorage::Stage::Client> persistent, kj::Maybe<kj::StringPtr> className,
+      Worker::ActorImpl::MakeStorageFunc makeStorage, TimerChannel& timerChannel,
+      kj::Own<ActorObserver> metricsParam,
+      kj::PromiseFulfillerPair<void> paf)
+    : worker(kj::atomicAddRef(workerRef)),
+      actorId(kj::mv(actorId)), makeStorage(kj::mv(makeStorage)),
+      metrics(kj::mv(metricsParam)),
+      hooks(timerChannel, *metrics),
+      inputGate(hooks), outputGate(hooks),
+      timerChannel(timerChannel),
+      shutdownPromise(paf.promise.fork()), shutdownFulfiller(kj::mv(paf.fulfiller)),
+      deletedAlarmTasks(*this) {
+  Worker::Lock lock(*worker, lockType);
 
-struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
-  kj::Own<const Worker> worker;
-  Actor::Id actorId;
-  MakeStorageFunc makeStorage;
-
-  kj::Own<ActorObserver> metrics;
-
-  kj::Maybe<jsg::Value> transient;
-  kj::Maybe<ActorCache> actorCache;
-
-  struct NoClass {};
-  struct Initializing {};
-
-  kj::OneOf<
-    NoClass,                         // not class-based
-    DurableObjectConstructor*,       // constructor not run yet
-    Initializing,                    // constructor currently running
-    api::ExportedHandler,            // fully constructed
-    kj::Exception                    // constructor threw
-  > classInstance;
-  // If the actor is backed by a class, this field tracks the instance through its stages. The
-  // instance is constructed as part of the first request to be delivered.
-
-  class HooksImpl: public InputGate::Hooks, public OutputGate::Hooks {
-  public:
-    HooksImpl(TimerChannel& timerChannel, ActorObserver& metrics)
-        : timerChannel(timerChannel), metrics(metrics) {}
-
-    void inputGateLocked() override { metrics.inputGateLocked(); }
-    void inputGateReleased() override { metrics.inputGateReleased(); }
-    void inputGateWaiterAdded() override { metrics.inputGateWaiterAdded(); }
-    void inputGateWaiterRemoved() override { metrics.inputGateWaiterRemoved(); }
-    // Implements InputGate::Hooks.
-
-    kj::Promise<void> makeTimeoutPromise() override {
-      return timerChannel.afterLimitTimeout(10 * kj::SECONDS)
-          .then([]() -> kj::Promise<void> {
-        return KJ_EXCEPTION(FAILED,
-            "broken.outputGateBroken; jsg.Error: Durable Object storage operation exceeded "
-            "timeout which caused object to be reset.");
-      });
-    }
-
-    void outputGateLocked() override { metrics.outputGateLocked(); }
-    void outputGateReleased() override { metrics.outputGateReleased(); }
-    void outputGateWaiterAdded() override { metrics.outputGateWaiterAdded(); }
-    void outputGateWaiterRemoved() override { metrics.outputGateWaiterRemoved(); }
-    // Implements OutputGate::Hooks.
-
-  private:
-    TimerChannel& timerChannel;    // only for afterLimitTimeout()
-    ActorObserver& metrics;
-  };
-
-  HooksImpl hooks;
-
-  InputGate inputGate;
-  // Handles both input locks and request locks.
-
-  OutputGate outputGate;
-  // Handles output locks.
-
-  kj::Maybe<kj::Own<IoContext>> ioContext;
-  // `ioContext` is initialized upon delivery of the first request.
-  // TODO(cleanup): Rename IoContext to IoContext.
-
-  kj::Maybe<kj::Own<kj::PromiseFulfiller<kj::Promise<void>>>> abortFulfiller;
-  // If onBroken() is called while `ioContext` is still null, this is initialized. When
-  // `ioContext` is constructed, this will be fulfilled with `ioContext.onAbort()`.
-
-  kj::Maybe<kj::Promise<void>> metricsFlushLoopTask;
-  // Task which periodically flushes metrics. Initialized after `ioContext` is initialized.
-
-  TimerChannel& timerChannel;
-
-  kj::ForkedPromise<void> shutdownPromise;
-  kj::Own<kj::PromiseFulfiller<void>> shutdownFulfiller;
-
-  kj::PromiseFulfillerPair<void> constructorFailedPaf = kj::newPromiseAndFulfiller<void>();
-
-  struct Alarm {
-    kj::Promise<void> alarmTask;
-    kj::ForkedPromise<WorkerInterface::AlarmResult> alarm;
-    kj::Own<kj::PromiseFulfiller<WorkerInterface::AlarmResult>> fulfiller;
-    kj::Date scheduledTime;
-  };
-
-  struct RunningAlarm : public Alarm {
-    kj::Maybe<Alarm> queuedAlarm;
-  };
-
-  kj::TaskSet deletedAlarmTasks;
-  kj::Maybe<RunningAlarm> runningAlarm;
-  // Used to handle deduplication of alarm requests
-
-  kj::Maybe<kj::Own<Worker::Actor>> maybeActor;
-  // TODO(now): We also have a hashmap of <key, Worker::Actor> in ActorNamespace (server.c++).
-  // In this case, I think we won't need to worry about the map holding a strong reference to the
-  // Worker::Actor, so we can move the Worker::Actor from the map to Worker::Actor::Impl, and put
-  // a Worker::Actor::Impl in the map.
-
-  Impl(const Worker& workerRef, LockType lockType, Actor::Id actorId,
-       bool hasTransient, kj::Maybe<rpc::ActorStorage::Stage::Client> persistent,
-       kj::Maybe<kj::StringPtr> className, MakeStorageFunc makeStorage, TimerChannel& timerChannel,
-       kj::Own<ActorObserver> metricsParam,
-       kj::PromiseFulfillerPair<void> paf = kj::newPromiseAndFulfiller<void>())
-      : worker(kj::atomicAddRef(workerRef)),
-        actorId(kj::mv(actorId)), makeStorage(kj::mv(makeStorage)),
-        metrics(kj::mv(metricsParam)),
-        hooks(timerChannel, *metrics),
-        inputGate(hooks), outputGate(hooks),
-        timerChannel(timerChannel),
-        shutdownPromise(paf.promise.fork()), shutdownFulfiller(kj::mv(paf.fulfiller)),
-        deletedAlarmTasks(*this) {
-    Worker::Lock lock(*worker, lockType);
-
-    KJ_IF_MAYBE(c, className) {
-      KJ_IF_MAYBE(cls, lock.getWorker().impl->actorClasses.find(*c)) {
-        classInstance = &(*cls);
-      } else {
-        kj::throwFatalException(KJ_EXCEPTION(FAILED, "broken.ignored; no such actor class", *c));
-      }
+  KJ_IF_MAYBE(c, className) {
+    KJ_IF_MAYBE(cls, lock.getWorker().impl->actorClasses.find(*c)) {
+      classInstance = &(*cls);
     } else {
-      classInstance = Impl::NoClass();
+      kj::throwFatalException(KJ_EXCEPTION(FAILED, "broken.ignored; no such actor class", *c));
     }
-
-    v8::Isolate* isolate = lock.getIsolate();
-    v8::HandleScope scope(isolate);
-    v8::Context::Scope contextScope(lock.getContext());
-    if (hasTransient) {
-      transient.emplace(isolate, v8::Object::New(isolate));
-    }
-
-    KJ_IF_MAYBE(p, persistent) {
-      actorCache.emplace(kj::mv(*p), worker->getIsolate().impl->actorCacheLru,
-                         outputGate);
-    }
+  } else {
+    classInstance = Worker::ActorImpl::NoClass();
   }
 
-  void taskFailed(kj::Exception&& e) override {
-    LOG_EXCEPTION("deletedAlarmTaskFailed", e);
+  v8::Isolate* isolate = lock.getIsolate();
+  v8::HandleScope scope(isolate);
+  v8::Context::Scope contextScope(lock.getContext());
+  if (hasTransient) {
+    transient.emplace(isolate, v8::Object::New(isolate));
   }
-};
+
+  KJ_IF_MAYBE(p, persistent) {
+    actorCache.emplace(kj::mv(*p), worker->getIsolate().impl->actorCacheLru, outputGate);
+  }
+}
 
 kj::Promise<Worker::AsyncLock> Worker::takeAsyncLockWhenActorCacheReady(
     kj::Date now, Actor& actor, RequestObserver& request) const {
@@ -2708,11 +2602,11 @@ void Worker::Actor::ensureConstructed(IoContext& context) {
       impl.classInstance = kj::mv(e);
     }));
 
-    impl.classInstance = Impl::Initializing();
+    impl.classInstance = ActorImpl::Initializing();
   }
 }
 
-// // TODO(now): We need to destroy Worker::Actor::Impl under lock now
+// // TODO(now): We need to destroy Worker::ActorImpl under lock now
 // Worker::Actor::~Actor() noexcept(false) {
 //   // TODO(someday) Each IoContext contains a strong reference to its Actor, so a IoContext
 //   // object must be destroyed before their Actor. However, IoContext has its lifetime extended
@@ -2916,8 +2810,8 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
       // delete itself.
       impl.deletedAlarmTasks.add(kj::mv(running.alarmTask));
 
-      impl.runningAlarm = running.queuedAlarm.map([](auto& alarm) -> Impl::RunningAlarm {
-        return Impl::RunningAlarm { Impl::Alarm { kj::mv(alarm) } };
+      impl.runningAlarm = running.queuedAlarm.map([](auto& alarm) -> ActorImpl::RunningAlarm {
+        return ActorImpl::RunningAlarm { ActorImpl::Alarm { kj::mv(alarm) } };
       });
     }).eagerlyEvaluate([](kj::Exception&& e) {
       LOG_EXCEPTION("runQueuedAlarm", e);
@@ -2928,7 +2822,7 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
     auto [prom, fulfiller] = kj::newPromiseAndFulfiller<WorkerInterface::AlarmResult>();
     auto& fulfillerRef = *fulfiller;
 
-    return Impl::Alarm {
+    return ActorImpl::Alarm {
       runningProm.then([runAlarmImpl = kj::mv(runAlarmImpl), &fulfillerRef]() mutable {
         return runAlarmImpl(fulfillerRef);
       }),
@@ -2966,8 +2860,8 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
   } else {
     auto [prom, fulfiller] = kj::newPromiseAndFulfiller<WorkerInterface::AlarmResult>();
     auto& fulfillerRef = *fulfiller;
-    auto& running = impl.runningAlarm.emplace(Impl::RunningAlarm {
-      Impl::Alarm {
+    auto& running = impl.runningAlarm.emplace(ActorImpl::RunningAlarm {
+      ActorImpl::Alarm {
         runAlarmImpl(fulfillerRef),
         prom.fork(),
         kj::mv(fulfiller),
@@ -2980,13 +2874,13 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
 
 kj::Maybe<api::ExportedHandler&> Worker::Actor::getHandler() {
   KJ_SWITCH_ONEOF(impl.classInstance) {
-    KJ_CASE_ONEOF(_, Impl::NoClass) {
+    KJ_CASE_ONEOF(_, ActorImpl::NoClass) {
       return nullptr;
     }
     KJ_CASE_ONEOF(_, DurableObjectConstructor*) {
       KJ_FAIL_ASSERT("ensureConstructed() wasn't called");
     }
-    KJ_CASE_ONEOF(_, Impl::Initializing) {
+    KJ_CASE_ONEOF(_, ActorImpl::Initializing) {
       // This shouldn't be possible because ensureConstructed() would have initiated the
       // construction task which would have taken an input lock as well as the isolate lock,
       // which should have prevented any other code from executing on the actor until they

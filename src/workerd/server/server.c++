@@ -15,7 +15,7 @@
 #include <workerd/jsg/setup.h>
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/io-context.h>
-#include <workerd/io/worker.h>
+#include <workerd/io/actor.h>
 #include <time.h>
 #include <openssl/bio.h>
 #include <openssl/pem.h>
@@ -1156,6 +1156,13 @@ public:
 
   class ActorNamespace {
   public:
+    struct LocalActor {
+      kj::Own<Worker::ActorImpl> actor;
+
+      struct None{};
+      kj::OneOf<None, Worker::Actor*, kj::Promise<void>> hibernationTaskOrActor = None{};
+    };
+
     ActorNamespace(WorkerService& service, kj::StringPtr className, const ActorConfig& config)
         : service(service), className(className), config(config) {}
 
@@ -1180,8 +1187,7 @@ public:
           }
         }
 
-        // auto actor = kj::addRef(*actors.findOrCreate(idStr, [&]() {
-        auto actorImpl = *actors.findOrCreate(idStr, [&]() {
+        auto& localActor = actors.findOrCreate(idStr, [&]() {
           auto persistent = config.tryGet<Durable>().map([&](const Durable& d) {
             // TODO(someday): Implement some sort of actual durable storage. For now we force
             //   `ActorCache` into `neverFlush` mode so that all state is kept in-memory.
@@ -1196,25 +1202,36 @@ public:
 
           TimerChannel& timerChannel = service;
           // auto newActor = kj::refcounted<Worker::Actor>(
-          auto newActorImpl = kj::heap<Worker::Actor::Impl>(
-              *service.worker, kj::mv(id), true, kj::mv(persistent),
-              className, kj::mv(makeStorage), lock,
+          auto newActorImpl = kj::heap<Worker::ActorImpl>(
+              *service.worker, lock, kj::mv(id), true, kj::mv(persistent),
+              className, kj::mv(makeStorage),
               timerChannel, kj::refcounted<ActorObserver>());
 
           // return kj::HashMap<kj::String, kj::Own<Worker::Actor>>::Entry {
-          return kj::HashMap<kj::String, kj::Own<Worker::Actor::Impl>>::Entry {
-            kj::mv(idStr), kj::mv(newActorImpl)
+
+          return kj::HashMap<kj::String, LocalActor>::Entry {
+            kj::mv(idStr), LocalActor{ .actor = kj::mv(newActorImpl) }
           };
         });
-        kj::Own<Worker::Actor> actor;
-        KJ_IF_MAYBE(a, actorImpl.get().maybeActor) {
-          actor = kj::addRef(*a);
-        } else {
-          auto& aRef = actorImpl.get().maybeActor.emplace(kj::refcounted<Worker::Actor>(*actorImpl));
-          actor = kj::addRef(aRef);
-        }
 
-        return kj::heap<ActorChannelImpl>(service, className, kj::mv(actor));
+        auto createActorRef = [&]() {
+          auto actorRef = kj::refcounted<Worker::Actor>(*localActor.actor);
+          localActor.hibernationTaskOrActor = actorRef.get();
+          return kj::mv(actorRef);
+        };
+        kj::Own<Worker::Actor> actorRef;
+        KJ_SWITCH_ONEOF(localActor.hibernationTaskOrActor) {
+          KJ_CASE_ONEOF(_, LocalActor::None) {
+            actorRef = createActorRef();
+          }
+          KJ_CASE_ONEOF(_, kj::Promise<void>) {
+            actorRef = createActorRef();
+          }
+          KJ_CASE_ONEOF(actor, Worker::Actor*) {
+            actorRef = kj::addRef(*actor);
+          }
+        }
+        return kj::heap<ActorChannelImpl>(service, className, kj::mv(actorRef));
       });
 
       return kj::heap<PromisedActorChannel>(service.waitUntilTasks, kj::mv(promise));
@@ -1224,7 +1241,7 @@ public:
     WorkerService& service;
     kj::StringPtr className;
     const ActorConfig& config;
-    kj::HashMap<kj::String, kj::Own<Worker::Actor::Impl>> actors;
+    kj::HashMap<kj::String, LocalActor> actors;
   };
 
 private:

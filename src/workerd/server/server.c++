@@ -15,7 +15,7 @@
 #include <workerd/jsg/setup.h>
 #include <workerd/io/compatibility-date.h>
 #include <workerd/io/io-context.h>
-#include <workerd/io/worker.h>
+#include <workerd/io/actor.h>
 #include <time.h>
 #include <openssl/bio.h>
 #include <openssl/pem.h>

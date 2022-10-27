@@ -2510,12 +2510,14 @@ void Worker::Isolate::logMessage(v8::Local<v8::Context> context,
 }
 
 // =======================================================================================
-
-struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
+// TODO(now): Rename to Worker::Actor
+struct Worker::ActorImpl final: public kj::TaskSet::ErrorHandler {
   kj::Own<const Worker> worker;
   Actor::Id actorId;
+
   using MakeStorageFunc = kj::Function<jsg::Ref<api::DurableObjectStorage>(
       jsg::Lock& js, const ApiIsolate& apiIsolate, ActorCache& actorCache)>;
+
   MakeStorageFunc makeStorage;
 
   kj::Own<ActorObserver> metrics;
@@ -2538,7 +2540,7 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
 
   static kj::OneOf<NoClass, DurableObjectConstructor*>
       buildClassInstance(Worker& worker, kj::Maybe<kj::StringPtr> className) {
-    // Used by the Worker::Actor::Impl constructor to initialize the classInstance.
+    // Used by the Worker::ActorImpl constructor to initialize the classInstance.
     KJ_IF_MAYBE(c, className) {
       KJ_IF_MAYBE(cls, worker.impl->actorClasses.find(*c)) {
         return &(*cls);
@@ -2591,7 +2593,6 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
 
   kj::Maybe<kj::Own<IoContext>> ioContext;
   // `ioContext` is initialized upon delivery of the first request.
-  // TODO(cleanup): Rename IoContext to IoContext.
 
   kj::Maybe<kj::Own<kj::PromiseFulfiller<kj::Promise<void>>>> abortFulfiller;
   // If onBroken() is called while `ioContext` is still null, this is initialized. When
@@ -2624,7 +2625,7 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
 
   bool hasCalledOnBroken = false;
 
-  Impl(Worker::Lock& lock, Actor::Id actorId,
+  ActorImpl(Worker::Lock& lock, Actor::Id actorId,
        bool hasTransient, kj::Maybe<rpc::ActorStorage::Stage::Client> persistent,
        kj::Maybe<kj::StringPtr> className, MakeStorageFunc makeStorage, TimerChannel& timerChannel,
        kj::Own<ActorObserver> metricsParam,
@@ -2638,6 +2639,7 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
         timerChannel(timerChannel),
         shutdownPromise(paf.promise.fork()), shutdownFulfiller(kj::mv(paf.fulfiller)),
         deletedAlarmTasks(*this) {
+
     v8::Isolate* isolate = lock.getIsolate();
     v8::HandleScope scope(isolate);
     v8::Context::Scope contextScope(lock.getContext());
@@ -2646,8 +2648,7 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
     }
 
     KJ_IF_MAYBE(p, persistent) {
-      actorCache.emplace(kj::mv(*p), worker->getIsolate().impl->actorCacheLru,
-                         outputGate);
+      actorCache.emplace(kj::mv(*p), worker->getIsolate().impl->actorCacheLru, outputGate);
     }
   }
 
@@ -2730,11 +2731,11 @@ void Worker::Actor::ensureConstructed(IoContext& context) {
       impl.classInstance = kj::mv(e);
     }));
 
-    impl.classInstance = Impl::Initializing();
+    impl.classInstance = ActorImpl::Initializing();
   }
 }
 
-// // TODO(now): We need to destroy Worker::Actor::Impl under lock now
+// // TODO(now): We need to destroy Worker::ActorImpl under lock now
 // Worker::Actor::~Actor() noexcept(false) {
 //   // TODO(someday) Each IoContext contains a strong reference to its Actor, so a IoContext
 //   // object must be destroyed before their Actor. However, IoContext has its lifetime extended
@@ -2922,8 +2923,8 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
       // delete itself.
       impl.deletedAlarmTasks.add(kj::mv(running.alarmTask));
 
-      impl.runningAlarm = running.queuedAlarm.map([](auto& alarm) -> Impl::RunningAlarm {
-        return Impl::RunningAlarm { Impl::Alarm { kj::mv(alarm) } };
+      impl.runningAlarm = running.queuedAlarm.map([](auto& alarm) -> ActorImpl::RunningAlarm {
+        return ActorImpl::RunningAlarm { ActorImpl::Alarm { kj::mv(alarm) } };
       });
     }).eagerlyEvaluate([](kj::Exception&& e) {
       LOG_EXCEPTION("runQueuedAlarm", e);
@@ -2934,7 +2935,7 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
     auto [prom, fulfiller] = kj::newPromiseAndFulfiller<WorkerInterface::AlarmResult>();
     auto& fulfillerRef = *fulfiller;
 
-    return Impl::Alarm {
+    return ActorImpl::Alarm {
       runningProm.then([runAlarmImpl = kj::mv(runAlarmImpl), &fulfillerRef]() mutable {
         return runAlarmImpl(fulfillerRef);
       }),
@@ -2972,8 +2973,8 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
   } else {
     auto [prom, fulfiller] = kj::newPromiseAndFulfiller<WorkerInterface::AlarmResult>();
     auto& fulfillerRef = *fulfiller;
-    auto& running = impl.runningAlarm.emplace(Impl::RunningAlarm {
-      Impl::Alarm {
+    auto& running = impl.runningAlarm.emplace(ActorImpl::RunningAlarm {
+      ActorImpl::Alarm {
         runAlarmImpl(fulfillerRef),
         prom.fork(),
         kj::mv(fulfiller),
@@ -2986,13 +2987,13 @@ kj::Promise<WorkerInterface::AlarmResult> Worker::Actor::dedupAlarm(
 
 kj::Maybe<api::ExportedHandler&> Worker::Actor::getHandler() {
   KJ_SWITCH_ONEOF(impl.classInstance) {
-    KJ_CASE_ONEOF(_, Impl::NoClass) {
+    KJ_CASE_ONEOF(_, ActorImpl::NoClass) {
       return nullptr;
     }
     KJ_CASE_ONEOF(_, DurableObjectConstructor*) {
       KJ_FAIL_ASSERT("ensureConstructed() wasn't called");
     }
-    KJ_CASE_ONEOF(_, Impl::Initializing) {
+    KJ_CASE_ONEOF(_, ActorImpl::Initializing) {
       // This shouldn't be possible because ensureConstructed() would have initiated the
       // construction task which would have taken an input lock as well as the isolate lock,
       // which should have prevented any other code from executing on the actor until they

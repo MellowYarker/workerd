@@ -2622,6 +2622,8 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
   kj::Maybe<RunningAlarm> runningAlarm;
   // Used to handle deduplication of alarm requests
 
+  bool hasCalledOnBroken = false;
+
   Impl(Worker::Lock& lock, Actor::Id actorId,
        bool hasTransient, kj::Maybe<rpc::ActorStorage::Stage::Client> persistent,
        kj::Maybe<kj::StringPtr> className, MakeStorageFunc makeStorage, TimerChannel& timerChannel,
@@ -2651,6 +2653,27 @@ struct Worker::Actor::Impl final: public kj::TaskSet::ErrorHandler {
 
   void taskFailed(kj::Exception&& e) override {
     LOG_EXCEPTION("deletedAlarmTaskFailed", e);
+  }
+
+  kj::Promise<void> onBroken() {
+    // TODO(soon): Detect and report other cases of brokenness, as described in worker.capnp.
+
+    KJ_ASSERT(!hasCalledOnBroken, "onBroken() can only be called once!");
+    kj::Promise<void> abortPromise = nullptr;
+
+    KJ_IF_MAYBE(rc, ioContext) {
+      abortPromise = rc->get()->onAbort();
+    } else {
+      auto paf = kj::newPromiseAndFulfiller<kj::Promise<void>>();
+      abortPromise = kj::mv(paf.promise);
+      abortFulfiller = kj::mv(paf.fulfiller);
+    }
+
+    return abortPromise
+      // inputGate.onBroken() is covered by IoContext::onAbort(), but outputGate.onBroken() is
+      // not.
+      .exclusiveJoin(outputGate.onBroken())
+      .exclusiveJoin(kj::mv(constructorFailedPaf.promise));
   }
 };
 
@@ -2758,23 +2781,7 @@ kj::Promise<void> Worker::Actor::onShutdown() {
 }
 
 kj::Promise<void> Worker::Actor::onBroken() {
-  // TODO(soon): Detect and report other cases of brokenness, as described in worker.capnp.
-
-  kj::Promise<void> abortPromise = nullptr;
-
-  KJ_IF_MAYBE(rc, impl.ioContext) {
-    abortPromise = rc->get()->onAbort();
-  } else {
-    auto paf = kj::newPromiseAndFulfiller<kj::Promise<void>>();
-    abortPromise = kj::mv(paf.promise);
-    impl.abortFulfiller = kj::mv(paf.fulfiller);
-  }
-
-  return abortPromise
-    // inputGate.onBroken() is covered by IoContext::onAbort(), but outputGate.onBroken() is
-    // not.
-    .exclusiveJoin(impl.outputGate.onBroken())
-    .exclusiveJoin(kj::mv(impl.constructorFailedPaf.promise));
+  return impl.onBroken();
 }
 
 const Worker::Actor::Id& Worker::Actor::getId() {

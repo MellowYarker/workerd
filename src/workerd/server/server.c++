@@ -1162,6 +1162,19 @@ public:
       kj::Maybe<Worker::Actor*> hibernationTaskOrActor;
     };
 
+    struct ActorRemoverTask {
+      // This struct should live as long as the Worker::Actor, and upon its destruction, should
+      // set its localActor's hibernationTaskOrActor to nullptr. This prevents future requests
+      // from attempting to access a Worker::Actor that has already been deallocated.
+      LocalActor& localActor;
+
+      ActorRemoverTask(LocalActor& localActor): localActor(localActor) {}
+
+      ~ActorRemoverTask() {
+        localActor.hibernationTaskOrActor = nullptr;
+      }
+    };
+
     ActorNamespace(WorkerService& service, kj::StringPtr className, const ActorConfig& config)
         : service(service), className(className), config(config) {}
 
@@ -1214,7 +1227,10 @@ public:
         auto createActorRef = [&]() {
           auto actorRef = kj::refcounted<Worker::Actor>(*localActor.actor);
           localActor.hibernationTaskOrActor = actorRef.get();
-          return kj::mv(actorRef);
+          auto remover = kj::heap<ActorRemoverTask>(localActor);
+          // This remover task will delete localActor's reference to `Worker::Actor` once the
+          // `Worker::Actor` is destroyed.
+          return actorRef.attach(kj::mv(remover));
         };
 
         kj::Own<Worker::Actor> actorRef;

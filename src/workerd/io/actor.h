@@ -108,6 +108,8 @@ struct Worker::ActorImpl final: public kj::TaskSet::ErrorHandler {
   kj::Maybe<RunningAlarm> runningAlarm;
   // Used to handle deduplication of alarm requests
 
+  bool hasCalledOnBroken = false;
+
   ActorImpl(Worker::Lock& lock, Actor::Id actorId,
        bool hasTransient, kj::Maybe<rpc::ActorStorage::Stage::Client> persistent,
        kj::Maybe<kj::StringPtr> className, MakeStorageFunc makeStorage, TimerChannel& timerChannel,
@@ -116,6 +118,27 @@ struct Worker::ActorImpl final: public kj::TaskSet::ErrorHandler {
 
   void taskFailed(kj::Exception&& e) override {
     LOG_EXCEPTION("deletedAlarmTaskFailed", e);
+  }
+
+  kj::Promise<void> onBroken() {
+    // TODO(soon): Detect and report other cases of brokenness, as described in worker.capnp.
+
+    KJ_ASSERT(!hasCalledOnBroken, "onBroken() can only be called once!");
+    kj::Promise<void> abortPromise = nullptr;
+
+    KJ_IF_MAYBE(rc, ioContext) {
+      abortPromise = rc->get()->onAbort();
+    } else {
+      auto paf = kj::newPromiseAndFulfiller<kj::Promise<void>>();
+      abortPromise = kj::mv(paf.promise);
+      abortFulfiller = kj::mv(paf.fulfiller);
+    }
+
+    return abortPromise
+      // inputGate.onBroken() is covered by IoContext::onAbort(), but outputGate.onBroken() is
+      // not.
+      .exclusiveJoin(outputGate.onBroken())
+      .exclusiveJoin(kj::mv(constructorFailedPaf.promise));
   }
 };
 

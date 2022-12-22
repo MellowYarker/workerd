@@ -13,6 +13,7 @@
 #include <v8.h>
 #include <workerd/io/actor-cache.h>
 #include <workerd/io/actor-storage.h>
+#include <workerd/api/web-socket.h>
 
 namespace workerd::api {
 
@@ -712,6 +713,35 @@ kj::OneOf<jsg::Ref<DurableObjectId>, kj::StringPtr> DurableObjectState::getId() 
 jsg::Promise<jsg::Value> DurableObjectState::blockConcurrencyWhile(jsg::Lock& js,
     jsg::Function<jsg::Promise<jsg::Value>()> callback) {
   return IoContext::current().blockConcurrencyWhile(js, kj::mv(callback));
+}
+
+void DurableObjectState::acceptWebSocket(jsg::Ref<WebSocket> ws, kj::Array<kj::String> tags) {
+  // TODO(now): Add this `ws` to our set of websockets (hibernation manager)
+  // and start delivering events.
+  JSG_ASSERT(!ws->isAccepted(), Error,
+      "Cannot call `acceptWebSocket()` if the WebSocket was already accepted via `accept()`");
+  JSG_ASSERT(ws->LOCAL == WebSocket::Locality::REMOTE, Error,
+      "Outgoing WebSocket connections cannot be hibernated.");
+  // TODO(now): Need to check a few other websocket states such as released and awaiting connection.
+  // return;
+}
+
+// const kj::Array<api::WebSocket> DurableObjectState::getWebSockets(kj::StringPtr tag) {
+jsg::Unimplemented DurableObjectState::getWebSockets(kj::StringPtr tag) {
+  kj::Vector<WebSocket> results;
+
+  // TODO(now): Iterate through hibernation manager's websockets and compare the tags!
+  // return results.releaseAsArray();
+
+  // TODO(now): Assuming the jsg websockets don't survive hibernation, and that kj websockets do,
+  // we need to deserialize the attachment property associated with each websocket now.
+
+  return jsg::Unimplemented();
+}
+
+void DurableObjectState::setEventTimeout(size_t ms) {
+  // TODO(soon): Deferring this for now.
+  return;
 }
 
 kj::Array<kj::byte> serializeV8Value(v8::Local<v8::Value> value, v8::Isolate* isolate) {

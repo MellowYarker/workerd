@@ -20,6 +20,7 @@ namespace workerd::api {
 
 // Forward-declared to avoid dependency cycle (actor.h -> http.h -> basics.h -> actor-state.h)
 class DurableObjectId;
+class WebSocket;
 
 kj::Array<kj::byte> serializeV8Value(v8::Local<v8::Value> value, v8::Isolate* isolate);
 
@@ -345,11 +346,40 @@ public:
   jsg::Promise<jsg::Value> blockConcurrencyWhile(jsg::Lock& js,
       jsg::Function<jsg::Promise<jsg::Value>()> callback);
 
+  void acceptWebSocket(jsg::Ref<WebSocket> ws, kj::Array<kj::String> tags);
+  // TODO(now): We get a bunch of errors when using an Array of StringPtr's -- figure this out.
+  //
+  // Adds a WebSocket to the set attached to this object.
+  // `ws.accept()` must NOT have been called separately.
+  // Once called, any incoming messages will be delivered
+  // by calling the Durable Object's webSocketMessage()
+  // handler, and webSocketClose() will be invoked upon
+  // disconnect.
+  //
+  // After calling this, the WebSocket is accepted, so
+  // its send() and close() methods can be used to send
+  // messages, but its addEventListener() method won't
+  // ever receive any events as they'll be delivered to
+  // the DurableObject instead.
+  //
+  // `tags` are string tags which can be used to look up
+  // the WebSocket with getWebSockets().
+
+  // const kj::Array<api::WebSocket> getWebSockets(kj::StringPtr tag);
+  jsg::Unimplemented getWebSockets(kj::StringPtr tag);
+  // Gets an array of accepted WebSockets matching the given tag.
+  // Disconnected WebSockets are automatically removed from the list.
+
+  void setEventTimeout(size_t ms);
+
   JSG_RESOURCE_TYPE(DurableObjectState) {
     JSG_METHOD(waitUntil);
     JSG_READONLY_INSTANCE_PROPERTY(id, getId);
     JSG_READONLY_INSTANCE_PROPERTY(storage, getStorage);
     JSG_METHOD(blockConcurrencyWhile);
+    JSG_METHOD(acceptWebSocket);
+    JSG_METHOD(getWebSockets);
+    JSG_METHOD(setEventTimeout);
 
     JSG_TS_ROOT();
     JSG_TS_OVERRIDE({
